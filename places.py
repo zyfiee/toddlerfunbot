@@ -3,8 +3,8 @@ import math
 from config import GOOGLE_API_KEY, SEARCH_RADIUS_METERS, MAX_RESULTS
 
 CATEGORY_QUERIES = {
-    "outdoors": ["playground", "park"],
-    "indoors": ["indoor play centre", "children's play area", "kids indoor playground"],
+    "outdoors": ["toddler playground outdoor", "toddler park outdoor"],
+    "indoors": ["indoor toddler play centre", "children's play area shelter", "kids indoor playground"],
 }
 
 
