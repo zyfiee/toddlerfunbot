@@ -1,19 +1,34 @@
 import requests
 import math
-from config import GOOGLE_API_KEY, SEARCH_RADIUS_METERS, MAX_RESULTS
+from config import GOOGLE_API_KEY
+
+# 🔧 Tunable constants
+SEARCH_RADIUS_METERS = 2000        # Soft bias
+MAX_DISTANCE_METERS = 2000         # HARD cutoff
+API_RESULT_COUNT = 15              # Fetch more, filter later
+FINAL_RESULTS = 5                  # What user sees
 
 CATEGORY_QUERIES = {
-    "outdoors": ["toddler playground outdoor", "toddler park outdoor"],
-    "indoors": ["indoor toddler play centre", "children's play area shelter", "kids indoor playground"],
+    "outdoors": [
+        "playground",
+        "kids playground",
+        "park playground"
+    ],
+    "indoors": [
+        "indoor playground",
+        "kids play centre"
+    ],
 }
 
 
+# ── Distance helpers ─────────────────────────────────────────────
+
 def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Calculate straight-line distance in metres between two coordinates."""
-    R = 6371000  # Earth radius in metres
+    R = 6371000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lng2 - lng1)
+
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
@@ -24,32 +39,50 @@ def format_distance(metres: float) -> str:
     return f"{metres / 1000:.1f}km"
 
 
+# ── Ranking logic (Google-like) ─────────────────────────────────
+
+def ranking_score(place: dict):
+    distance = place["_distance_m"]
+    rating = place.get("rating") or 0
+    reviews = place.get("userRatingCount") or 0
+
+    return (
+        distance,                 # closest first
+        -rating,                  # higher rating first
+        -min(reviews, 1000),      # popularity (capped)
+    )
+
+
+# ── Core search ─────────────────────────────────────────────────
+
 def search_places(lat: float, lng: float, category: str) -> list[dict]:
-    """Search Google Places API (New), deduplicate, sort by proximity."""
     queries = CATEGORY_QUERIES.get(category, [])
     results = []
     seen_ids = set()
 
+    url = "https://places.googleapis.com/v1/places:searchText"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.rating,places.userRatingCount,places.googleMapsUri,"
+            "places.currentOpeningHours,places.location"
+        ),
+    }
+
     for query in queries:
-        url = "https://places.googleapis.com/v1/places:searchText"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": GOOGLE_API_KEY,
-            "X-Goog-FieldMask": (
-                "places.id,places.displayName,places.formattedAddress,"
-                "places.rating,places.userRatingCount,places.googleMapsUri,"
-                "places.currentOpeningHours,places.location"
-            ),
-        }
         payload = {
             "textQuery": query,
+            "rankPreference": "DISTANCE",  # 🔥 critical
             "locationBias": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
                     "radius": SEARCH_RADIUS_METERS,
                 }
             },
-            "maxResultCount": MAX_RESULTS,
+            "maxResultCount": API_RESULT_COUNT,
         }
 
         response = requests.post(url, json=payload, headers=headers)
@@ -57,31 +90,47 @@ def search_places(lat: float, lng: float, category: str) -> list[dict]:
 
         for place in data.get("places", []):
             pid = place.get("id")
-            if pid and pid not in seen_ids:
-                seen_ids.add(pid)
+            if not pid or pid in seen_ids:
+                continue
 
-                # Attach calculated distance from user
-                place_lat = place.get("location", {}).get("latitude")
-                place_lng = place.get("location", {}).get("longitude")
-                if place_lat and place_lng:
-                    place["_distance_m"] = haversine_distance(lat, lng, place_lat, place_lng)
-                else:
-                    place["_distance_m"] = float("inf")
+            seen_ids.add(pid)
 
-                results.append(place)
+            # Get coordinates
+            place_lat = place.get("location", {}).get("latitude")
+            place_lng = place.get("location", {}).get("longitude")
 
-    # Sort by proximity — closest first
-    results.sort(key=lambda p: p["_distance_m"])
+            if not place_lat or not place_lng:
+                continue
 
-    return results[:MAX_RESULTS]
+            # Calculate distance
+            distance = haversine_distance(lat, lng, place_lat, place_lng)
 
+            # 🔥 HARD FILTER (no >2km results EVER)
+            if distance > MAX_DISTANCE_METERS:
+                continue
+
+            # Optional quality filters (huge UX improvement)
+            rating = place.get("rating") or 0
+            reviews = place.get("userRatingCount") or 0
+
+            if rating < 3.5 or reviews < 5:
+                continue
+
+            place["_distance_m"] = distance
+            results.append(place)
+
+    # Sort like Google Maps (distance + quality)
+    results.sort(key=ranking_score)
+
+    return results[:FINAL_RESULTS]
+
+
+# ── Map links ───────────────────────────────────────────────────
 
 def build_map_links(place: dict) -> list[tuple[str, str]]:
-    """Return (label, url) tuples for Google Maps, Waze, and Apple Maps."""
     loc = place.get("location", {})
     lat = loc.get("latitude")
     lng = loc.get("longitude")
-    name = place.get("displayName", {}).get("text", "")
 
     links = []
     if lat and lng:
@@ -97,11 +146,13 @@ def build_map_links(place: dict) -> list[tuple[str, str]]:
             "🍎 Apple Maps",
             f"https://maps.apple.com/?q={lat},{lng}"
         ))
+
     return links
 
 
+# ── Formatter ───────────────────────────────────────────────────
+
 def format_place(place: dict, index: int) -> str:
-    """Format a single place as a Telegram message string."""
     name = place.get("displayName", {}).get("text", "Unknown")
     address = place.get("formattedAddress", "No address available")
     rating = place.get("rating", "N/A")
@@ -110,6 +161,7 @@ def format_place(place: dict, index: int) -> str:
 
     hours_info = place.get("currentOpeningHours", {})
     open_now = hours_info.get("openNow")
+
     if open_now is True:
         status = "🟢 Open now"
     elif open_now is False:
