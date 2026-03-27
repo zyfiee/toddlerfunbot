@@ -1,5 +1,4 @@
 import logging
-from flask import Flask, request
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup
@@ -9,13 +8,10 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 from places import search_places, format_place, build_map_links
-from config import TELEGRAM_TOKEN, WEBHOOK_URL, PORT
+from config import TELEGRAM_TOKEN
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-flask_app = Flask(__name__)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -33,7 +29,6 @@ def geocode_address(address: str):
 
 
 def category_filter_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard to pick Outdoors or Indoors."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🌳 Outdoors", callback_data="cat:outdoors"),
         InlineKeyboardButton("🏠 Indoors", callback_data="cat:indoors"),
@@ -41,7 +36,6 @@ def category_filter_keyboard() -> InlineKeyboardMarkup:
 
 
 def refilter_keyboard() -> InlineKeyboardMarkup:
-    """Shown after results — lets user switch filter without re-entering location."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🔄 Change Filter", callback_data="refilter"),
         InlineKeyboardButton("📍 Change Location", callback_data="change_location"),
@@ -49,7 +43,6 @@ def refilter_keyboard() -> InlineKeyboardMarkup:
 
 
 def map_links_keyboard(place: dict) -> InlineKeyboardMarkup:
-    """One row of map app buttons per place."""
     links = build_map_links(place)
     buttons = [InlineKeyboardButton(label, url=url) for label, url in links]
     return InlineKeyboardMarkup([buttons])
@@ -73,7 +66,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store live location and prompt for category."""
     loc = update.message.location
     context.user_data["lat"] = loc.latitude
     context.user_data["lng"] = loc.longitude
@@ -120,7 +112,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     chat_id = query.message.chat_id
 
-    # ── Re-filter: show category picker again without clearing location ──
     if data == "refilter":
         await context.bot.send_message(
             chat_id=chat_id,
@@ -130,7 +121,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Change location: reset and ask for location again ──
     if data == "change_location":
         context.user_data.clear()
         keyboard = [
@@ -144,9 +134,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Category selected: fetch and display results ──
     if data.startswith("cat:"):
-        category = data.split(":")[1]  # "outdoors" or "indoors"
+        category = data.split(":")[1]
         lat = context.user_data.get("lat")
         lng = context.user_data.get("lng")
 
@@ -170,15 +159,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not places:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    "😕 No places found nearby.\n"
-                    "Try switching the filter or searching from a different location."
-                ),
+                text="😕 No places found nearby.\nTry switching the filter or a different location.",
                 reply_markup=refilter_keyboard(),
             )
             return
 
-        # Header message
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
@@ -188,16 +173,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-        # Send each place with its own map links row
         for i, place in enumerate(places, start=1):
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=format_place(place, i),
                 parse_mode="Markdown",
-                reply_markup=map_links_keyboard(place),  # 🗺 Waze 🍎 buttons
+                reply_markup=map_links_keyboard(place),
             )
 
-        # Footer with re-filter option
         await context.bot.send_message(
             chat_id=chat_id,
             text="Want to explore more?",
@@ -207,36 +190,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Register handlers ─────────────────────────────────────────────────────────
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.LOCATION, handle_location))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-application.add_handler(CallbackQueryHandler(handle_callback))
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
-# ── Flask webhook ─────────────────────────────────────────────────────────────
-
-@flask_app.post("/webhook")
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return "ok", 200
-
-
-@flask_app.get("/")
-def health():
-    return "Bot is running!", 200
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-async def setup_webhook():
-    await application.initialize()
-    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    logger.info(f"Webhook set to {WEBHOOK_URL}/webhook")
+    logger.info("Bot started in polling mode...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(setup_webhook())
-    flask_app.run(host="0.0.0.0", port=PORT)
+    main()
+```
+
+---
+
+#### 📄 `requirements.txt` (updated — Flask removed, not needed)
+```
+python-telegram-bot==21.6
+requests==2.32.3
