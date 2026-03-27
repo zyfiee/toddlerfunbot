@@ -204,11 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
----
-
-#### 📄 `requirements.txt` (updated — Flask removed, not needed)
-```
-python-telegram-bot==21.6
-requests==2.32.3
