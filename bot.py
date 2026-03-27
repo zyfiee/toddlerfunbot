@@ -7,6 +7,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
+
 from places import search_places, format_place, build_map_links
 from config import TELEGRAM_TOKEN
 
@@ -19,27 +20,38 @@ logger = logging.getLogger(__name__)
 def geocode_address(address: str):
     import requests
     from config import GOOGLE_API_KEY
+
     url = "https://maps.googleapis.com/maps/api/geocode/json"
     params = {"address": address, "key": GOOGLE_API_KEY}
+
     resp = requests.get(url, params=params).json()
+
     if resp.get("results"):
         loc = resp["results"][0]["geometry"]["location"]
         return loc["lat"], loc["lng"]
+
     return None
 
 
 def category_filter_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🌳 Outdoors", callback_data="cat:outdoors"),
-        InlineKeyboardButton("🏠 Indoors", callback_data="cat:indoors"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌳 Outdoors", callback_data="cat:outdoors"),
+            InlineKeyboardButton("🏠 Indoors", callback_data="cat:indoors"),
+        ],
+        [
+            InlineKeyboardButton("🍽 Food (Kid-friendly)", callback_data="cat:food"),
+        ]
+    ])
 
 
 def refilter_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 Change Filter", callback_data="refilter"),
-        InlineKeyboardButton("📍 Change Location", callback_data="change_location"),
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Change Filter", callback_data="refilter"),
+            InlineKeyboardButton("📍 Change Location", callback_data="change_location"),
+        ]
+    ])
 
 
 def map_links_keyboard(place: dict) -> InlineKeyboardMarkup:
@@ -52,14 +64,16 @@ def map_links_keyboard(place: dict) -> InlineKeyboardMarkup:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
+
     keyboard = [
         [KeyboardButton("📍 Share My Location", request_location=True)],
         [KeyboardButton("🔍 Enter Location Manually")],
     ]
+
     await update.message.reply_text(
         "👶 *Welcome to the Toddler Places Bot!*\n\n"
-        "I'll help you find toddler-friendly spots nearby.\n"
-        "Share your location or type an address to get started!",
+        "Find toddler-friendly spots near you.\n"
+        "Share your location or type an address to begin!",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
@@ -67,12 +81,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
+
     context.user_data["lat"] = loc.latitude
     context.user_data["lng"] = loc.longitude
     context.user_data["awaiting_manual_location"] = False
+
     await update.message.reply_text(
-        "📍 Location received! Are you looking for *outdoor* or *indoor* places?",
-        parse_mode="Markdown",
+        "📍 Location received! What are you looking for?",
         reply_markup=category_filter_keyboard(),
     )
 
@@ -82,26 +97,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🔍 Enter Location Manually":
         context.user_data["awaiting_manual_location"] = True
+
         await update.message.reply_text(
-            "Please type your address or area name\n(e.g. *Tampines, Singapore*) :",
+            "Please type your address or area (e.g. *Tampines, Singapore*):",
             parse_mode="Markdown",
         )
         return
 
     if context.user_data.get("awaiting_manual_location"):
         context.user_data["awaiting_manual_location"] = False
-        await update.message.reply_text("🔎 Looking up your location...")
+
+        await update.message.reply_text("🔎 Finding location...")
+
         coords = geocode_address(text)
+
         if not coords:
             await update.message.reply_text(
-                "❌ Couldn't find that location. Please try a more specific address."
+                "❌ Couldn't find that location. Try a more specific address."
             )
             context.user_data["awaiting_manual_location"] = True
             return
+
         context.user_data["lat"], context.user_data["lng"] = coords
+
         await update.message.reply_text(
-            "✅ Got it! Are you looking for *outdoor* or *indoor* places?",
-            parse_mode="Markdown",
+            "📍 Got it! What are you looking for?",
             reply_markup=category_filter_keyboard(),
         )
 
@@ -109,48 +129,60 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     data = query.data
     chat_id = query.message.chat_id
+
+    # ── Reset flow ─────────────────────────────
 
     if data == "refilter":
         await context.bot.send_message(
             chat_id=chat_id,
-            text="🔄 Switch filter — are you looking for *outdoor* or *indoor* places?",
-            parse_mode="Markdown",
+            text="🔄 Choose a new filter:",
             reply_markup=category_filter_keyboard(),
         )
         return
 
     if data == "change_location":
         context.user_data.clear()
+
         keyboard = [
             [KeyboardButton("📍 Share My Location", request_location=True)],
             [KeyboardButton("🔍 Enter Location Manually")],
         ]
+
         await context.bot.send_message(
             chat_id=chat_id,
-            text="📍 Sure! Please share your new location:",
+            text="📍 Please share your new location:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         )
         return
 
+    # ── Category selection ─────────────────────
+
     if data.startswith("cat:"):
         category = data.split(":")[1]
+
         lat = context.user_data.get("lat")
         lng = context.user_data.get("lng")
 
-        if not lat or not lng:
+        if lat is None or lng is None:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="❌ No location found. Please tap /start to begin again."
+                text="❌ No location found. Please restart with /start"
             )
             return
 
-        emoji = "🌳" if category == "outdoors" else "🏠"
-        label = "outdoor" if category == "outdoors" else "indoor"
+        emoji = {
+            "outdoors": "🌳",
+            "indoors": "🏠",
+            "food": "🍽"
+        }.get(category, "📍")
+
+        label = category
 
         await query.edit_message_text(
-            f"{emoji} Searching for *{label}* toddler-friendly places near you...",
+            f"{emoji} Searching for *{label}* toddler-friendly places...",
             parse_mode="Markdown",
         )
 
@@ -159,17 +191,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not places:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="😕 No places found nearby.\nTry switching the filter or a different location.",
+                text="😕 No places found. Try another filter or location.",
                 reply_markup=refilter_keyboard(),
             )
             return
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"{emoji} *Top {len(places)} {label} places nearby*\n"
-                f"_Sorted by distance, closest first:_"
-            ),
+            text=f"{emoji} *Top {len(places)} {label} places nearby*",
             parse_mode="Markdown",
         )
 
@@ -188,7 +217,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ── Register handlers ─────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -198,7 +227,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info("Bot started in polling mode...")
+    logger.info("Bot started...")
     app.run_polling(drop_pending_updates=True)
 
 
