@@ -2,11 +2,12 @@ import requests
 import math
 from config import GOOGLE_API_KEY
 
-# 🔧 Tunable constants
-SEARCH_RADIUS_METERS = 2000        # Soft bias
-MAX_DISTANCE_METERS = 2000         # HARD cutoff
-API_RESULT_COUNT = 15              # Fetch more, filter later
-FINAL_RESULTS = 5                  # What user sees
+# ── Config ─────────────────────────────────────────────
+
+SEARCH_RADIUS_METERS = 2000
+MAX_DISTANCE_METERS = 2000
+API_RESULT_COUNT = 15
+FINAL_RESULTS = 5
 
 CATEGORY_QUERIES = {
     "outdoors": [
@@ -18,12 +19,31 @@ CATEGORY_QUERIES = {
         "indoor playground",
         "kids play centre"
     ],
+    "food": [
+        "family friendly restaurant",
+        "kids friendly cafe",
+        "cafe with play area",
+        "restaurant playground"
+    ],
 }
 
+# 🔍 Review keywords
+POSITIVE_KEYWORDS = [
+    "kid", "kids", "child", "children",
+    "family", "family-friendly",
+    "play", "playground", "play area",
+    "toddler", "baby"
+]
 
-# ── Distance helpers ─────────────────────────────────────────────
+NEGATIVE_KEYWORDS = [
+    "not kid", "not for kids", "no kids",
+    "crowded", "unsafe", "dirty"
+]
 
-def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+
+# ── Distance ───────────────────────────────────────────
+
+def haversine_distance(lat1, lng1, lat2, lng2):
     R = 6371000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -33,29 +53,53 @@ def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> fl
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def format_distance(metres: float) -> str:
+def format_distance(metres):
     if metres < 1000:
         return f"{int(metres)}m"
     return f"{metres / 1000:.1f}km"
 
 
-# ── Ranking logic (Google-like) ─────────────────────────────────
+# ── Review Scoring ─────────────────────────────────────
 
-def ranking_score(place: dict):
+def score_reviews(place):
+    reviews = place.get("reviews", [])
+    score = 0
+
+    for r in reviews:
+        text = (r.get("text", {}).get("text") or "").lower()
+
+        # positive signals
+        for kw in POSITIVE_KEYWORDS:
+            if kw in text:
+                score += 2
+
+        # negative signals
+        for kw in NEGATIVE_KEYWORDS:
+            if kw in text:
+                score -= 3
+
+    return score
+
+
+# ── Ranking ────────────────────────────────────────────
+
+def ranking_score(place):
     distance = place["_distance_m"]
     rating = place.get("rating") or 0
     reviews = place.get("userRatingCount") or 0
+    review_score = place.get("_review_score", 0)
 
     return (
-        distance,                 # closest first
-        -rating,                  # higher rating first
-        -min(reviews, 1000),      # popularity (capped)
+        distance,
+        -review_score,           # 🔥 NEW: prioritise kid-friendly signal
+        -rating,
+        -min(reviews, 1000),
     )
 
 
-# ── Core search ─────────────────────────────────────────────────
+# ── Core search ────────────────────────────────────────
 
-def search_places(lat: float, lng: float, category: str) -> list[dict]:
+def search_places(lat, lng, category):
     queries = CATEGORY_QUERIES.get(category, [])
     results = []
     seen_ids = set()
@@ -68,14 +112,15 @@ def search_places(lat: float, lng: float, category: str) -> list[dict]:
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.rating,places.userRatingCount,places.googleMapsUri,"
-            "places.currentOpeningHours,places.location"
+            "places.currentOpeningHours,places.location,"
+            "places.reviews"  # 🔥 IMPORTANT
         ),
     }
 
     for query in queries:
         payload = {
             "textQuery": query,
-            "rankPreference": "DISTANCE",  # 🔥 critical
+            "rankPreference": "DISTANCE",
             "locationBias": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
@@ -95,64 +140,68 @@ def search_places(lat: float, lng: float, category: str) -> list[dict]:
 
             seen_ids.add(pid)
 
-            # Get coordinates
-            place_lat = place.get("location", {}).get("latitude")
-            place_lng = place.get("location", {}).get("longitude")
+            loc = place.get("location", {})
+            place_lat = loc.get("latitude")
+            place_lng = loc.get("longitude")
 
             if not place_lat or not place_lng:
                 continue
 
-            # Calculate distance
             distance = haversine_distance(lat, lng, place_lat, place_lng)
 
-            # 🔥 HARD FILTER (no >2km results EVER)
+            # 🔥 HARD FILTER
             if distance > MAX_DISTANCE_METERS:
                 continue
 
-            # Optional quality filters (huge UX improvement)
             rating = place.get("rating") or 0
-            reviews = place.get("userRatingCount") or 0
+            reviews_count = place.get("userRatingCount") or 0
 
-            if rating < 3.5 or reviews < 5:
-                continue
+            # ── Category-specific logic ──
+
+            if category == "food":
+                if rating < 3.8 or reviews_count < 20:
+                    continue
+
+                review_score = score_reviews(place)
+                place["_review_score"] = review_score
+
+                # 🔥 Require positive signal
+                if review_score < 2:
+                    continue
+
+            else:
+                if rating < 3.5 or reviews_count < 5:
+                    continue
+
+                place["_review_score"] = 0
 
             place["_distance_m"] = distance
             results.append(place)
 
-    # Sort like Google Maps (distance + quality)
     results.sort(key=ranking_score)
 
     return results[:FINAL_RESULTS]
 
 
-# ── Map links ───────────────────────────────────────────────────
+# ── Map links ──────────────────────────────────────────
 
-def build_map_links(place: dict) -> list[tuple[str, str]]:
+def build_map_links(place):
     loc = place.get("location", {})
     lat = loc.get("latitude")
     lng = loc.get("longitude")
 
     links = []
     if lat and lng:
-        links.append((
-            "🗺 Google Maps",
-            f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
-        ))
-        links.append((
-            "📍 Waze",
-            f"https://waze.com/ul?ll={lat},{lng}&navigate=yes"
-        ))
-        links.append((
-            "🍎 Apple Maps",
-            f"https://maps.apple.com/?q={lat},{lng}"
-        ))
+        links.append(("🗺 Google Maps", f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"))
+        links.append(("📍 Waze", f"https://waze.com/ul?ll={lat},{lng}&navigate=yes"))
+        links.append(("🍎 Apple Maps", f"https://maps.apple.com/?q={lat},{lng}"))
 
     return links
 
 
-# ── Formatter ───────────────────────────────────────────────────
+# ── Formatter ──────────────────────────────────────────
 
-def format_place(place: dict, index: int) -> str:
+def format_place(place, index):
     name = place.get("displayName", {}).get("text", "Unknown")
     address = place.get("formattedAddress", "No address available")
     rating = place.get("rating", "N/A")
